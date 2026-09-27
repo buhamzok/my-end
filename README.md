@@ -220,8 +220,9 @@ Avoid reasoning models and anything above ~14B parameters. Reasoning adds latenc
 
 | Piece | What | Notes |
 |---|---|---|
-| Speech-to-text | [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper), model `large-v3-turbo`, float16 | About 2–3 GB VRAM, so it fits alongside `qwen3:8b` on 16 GB. Tuned for speed: greedy decoding (`beam_size=1`), silence trimming (`vad_filter`), fixed language (no auto-detect). |
+| Speech-to-text (default) | [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper), model `large-v3-turbo`, float16 | About 2–3 GB VRAM, so it fits alongside `qwen3:8b` on 16 GB. Tuned for speed: greedy decoding (`beam_size=1`), silence trimming (`vad_filter`), fixed language (no auto-detect). |
 | CUDA libraries | cuBLAS 12 + cuDNN 9 | `pip install nvidia-cublas-cu12 nvidia-cudnn-cu12`. The script adds their folders to the DLL path itself, so no manual PATH editing is needed on Windows. |
+| Speech-to-text (`--asr sunflower`) | Sunbird AI's [SunflowerASR](https://huggingface.co/Sunbird/SunflowerASR-51-african-languages), run with `transformers` + PyTorch (CUDA) | Whisper large-v3 fine-tuned by Sunbird AI (Uganda) on 7,400+ hours of African speech, so it handles African-accented English and Swahili better. About 3–4 GB VRAM, and slower than `large-v3-turbo`. |
 | Microphone | `sounddevice` + `numpy` | 16 kHz mono, push-to-talk. |
 | Text-to-speech | `pyttsx3` | Uses the offline Windows voices. It's only a stand-in for the phone provider's TTS. Use `--no-tts` to print replies instead. |
 | LLM | Ollama + `qwen3:8b` | See above. |
@@ -233,7 +234,15 @@ ollama pull qwen3:8b
 python examples/voice_chat.py                    # English
 python examples/voice_chat.py --language sw      # Swahili
 python examples/voice_chat.py --device cpu --whisper-model small   # no GPU
+
+# SunflowerASR instead of Whisper
+pip install torch --index-url https://download.pytorch.org/whl/cu124
+pip install transformers
+python examples/voice_chat.py --asr sunflower
+python examples/voice_chat.py --asr sunflower --language sw
 ```
+
+SunflowerASR can also transcribe Luganda, Runyankole and other Ugandan languages, but `qwen3:8b` understands them poorly. For now the local-language path stays on the keypad menu, as §6 describes. A later version could put a translation step between SunflowerASR and the harness.
 
 Each turn prints how long speech-to-text and the LLM took, and the ticket is printed at the end. Whisper's Swahili is usable but weaker than its English, and it doesn't support Luganda or Runyankole. Those languages go through the keypad path (`triage/dtmf.py`).
 

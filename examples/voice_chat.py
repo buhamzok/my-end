@@ -1,6 +1,11 @@
 """Speak to the harness through the PC's mic, before the phone line exists.
 
-    mic -> faster-whisper (GPU) -> IntakeSession + local Ollama model -> spoken reply
+    mic -> speech-to-text (GPU) -> IntakeSession + local Ollama model -> spoken reply
+
+Speech-to-text engines (--asr):
+    whisper    faster-whisper large-v3-turbo (default, fastest)
+    sunflower  Sunbird AI's SunflowerASR, Whisper large-v3 fine-tuned on 7,400+ hours
+               of African speech: better on African-accented English and Swahili
 
     pip install -e ".[voice]"
     pip install nvidia-cublas-cu12 nvidia-cudnn-cu12     # CUDA libs for faster-whisper
@@ -8,6 +13,11 @@
     python examples/voice_chat.py                        # English
     python examples/voice_chat.py --language sw          # Swahili
     python examples/voice_chat.py --device cpu --whisper-model small --compute-type int8
+
+    # SunflowerASR also needs PyTorch with CUDA and transformers:
+    pip install torch --index-url https://download.pytorch.org/whl/cu124
+    pip install transformers
+    python examples/voice_chat.py --asr sunflower
 
 Push-to-talk: press Enter to start speaking, Enter again to stop.
 Type q then Enter (or Ctrl+C) to hang up. Prints timings and the final ticket.
@@ -21,6 +31,7 @@ import os
 import time
 
 SAMPLE_RATE = 16_000  # what Whisper expects
+SUNFLOWER_ASR = "Sunbird/SunflowerASR-51-african-languages"
 
 
 def add_cuda_dll_dirs() -> None:
@@ -67,36 +78,16 @@ def speak(text: str, enabled: bool) -> None:
     engine.stop()
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--whisper-model", default="large-v3-turbo")
-    parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
-    parser.add_argument("--compute-type", default=None, help="default: float16 on cuda, int8 on cpu")
-    parser.add_argument("--language", default="en", help="en, sw, or auto")
-    parser.add_argument("--llm-model", default="qwen3:8b")
-    parser.add_argument("--host", default="http://localhost:11434")
-    parser.add_argument("--omit-think", action="store_true")
-    parser.add_argument("--no-tts", action="store_true", help="print replies instead of speaking them")
-    args = parser.parse_args()
-
-    if args.device == "cuda":
-        add_cuda_dll_dirs()
-    import numpy as np
-    import sounddevice as sd
+def load_whisper(args):
     from faster_whisper import WhisperModel
-
-    from triage import IntakeSession
-    from triage.adapters import OllamaClient
 
     compute_type = args.compute_type or ("float16" if args.device == "cuda" else "int8")
     language = None if args.language == "auto" else args.language
-
     print(f"Loading Whisper {args.whisper_model} on {args.device} ({compute_type})...")
-    whisper = WhisperModel(args.whisper_model, device=args.device, compute_type=compute_type)
-    list(whisper.transcribe(np.zeros(SAMPLE_RATE, dtype="float32"), language=language or "en")[0])
+    model = WhisperModel(args.whisper_model, device=args.device, compute_type=compute_type)
 
     def transcribe(audio) -> str:
-        segments, _ = whisper.transcribe(
+        segments, _ = model.transcribe(
             audio,
             language=language,
             beam_size=1,  # greedy decoding: much faster, little accuracy loss on short turns
@@ -104,6 +95,73 @@ def main() -> None:
             condition_on_previous_text=False,
         )
         return " ".join(segment.text.strip() for segment in segments).strip()
+
+    return transcribe
+
+
+def load_sunflower(args):
+    import torch
+    import transformers
+    from transformers import pipeline
+
+    use_gpu = args.device == "cuda"
+    if use_gpu and not torch.cuda.is_available():
+        raise SystemExit(
+            "PyTorch can't see the GPU. Install the CUDA build:\n"
+            "  pip install torch --index-url https://download.pytorch.org/whl/cu124"
+        )
+    dtype = torch.float16 if use_gpu else torch.float32
+    print(f"Loading {SUNFLOWER_ASR} on {args.device}...")
+    major, minor = (int(part) for part in transformers.__version__.split(".")[:2])
+    dtype_arg = "dtype" if (major, minor) >= (4, 56) else "torch_dtype"  # renamed in 4.56
+    asr = pipeline(
+        "automatic-speech-recognition",
+        model=SUNFLOWER_ASR,
+        device=0 if use_gpu else -1,
+        **{dtype_arg: dtype},
+    )
+    generate_kwargs = {"task": "transcribe", "num_beams": 1}
+    if args.language != "auto":
+        generate_kwargs["language"] = args.language
+
+    def transcribe(audio) -> str:
+        result = asr({"raw": audio, "sampling_rate": SAMPLE_RATE}, generate_kwargs=generate_kwargs)
+        return result["text"].strip()
+
+    return transcribe
+
+
+def load_transcriber(args, np):
+    """Load the chosen engine and warm it up so the first real turn isn't slow."""
+    transcribe = load_sunflower(args) if args.asr == "sunflower" else load_whisper(args)
+    transcribe(np.zeros(SAMPLE_RATE, dtype="float32"))
+    return transcribe
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--asr", default="whisper", choices=["whisper", "sunflower"])
+    parser.add_argument("--whisper-model", default="large-v3-turbo")
+    parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"])
+    parser.add_argument(
+        "--compute-type", default=None, help="whisper only; default float16 on cuda, int8 on cpu"
+    )
+    parser.add_argument("--language", default="en", help="en, sw, or auto")
+    parser.add_argument("--llm-model", default="qwen3:8b")
+    parser.add_argument("--host", default="http://localhost:11434")
+    parser.add_argument("--omit-think", action="store_true")
+    parser.add_argument("--no-tts", action="store_true", help="print replies instead of speaking them")
+    args = parser.parse_args()
+
+    if args.device == "cuda" and args.asr == "whisper":
+        add_cuda_dll_dirs()
+    import numpy as np
+    import sounddevice as sd
+
+    from triage import IntakeSession
+    from triage.adapters import OllamaClient
+
+    transcribe = load_transcriber(args, np)
 
     llm = OllamaClient(args.llm_model, args.host, think=None if args.omit_think else False)
     session = IntakeSession(llm)
