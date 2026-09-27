@@ -193,4 +193,23 @@ decision = decide(report_from_keypresses({"age_group": "2", "fever": "1", "durat
 
 `triage.dtmf.MENU` holds the question script for recording the local-language prompts.
 
+### Testing with a local model
+
+`triage.adapters.OllamaClient` runs the harness against a model served by [Ollama](https://ollama.com). It uses no extra Python dependencies. The request pins the output to the `LLMTurn` JSON schema, so the model can't return malformed JSON and retries are rare.
+
+```bash
+ollama pull qwen3:8b
+python examples/local_chat.py                            # type as the caller; shows latency per turn
+python examples/local_chat.py --model gemma3:12b --omit-think
+```
+
+**Recommended model for a 16 GB RTX 4090 laptop GPU:**
+
+| Model | VRAM (Q4) | Why |
+|---|---|---|
+| **`qwen3:8b`** (default) | ~5–6 GB | Fast. It follows JSON and system rules well and supports Swahili. It leaves room for Whisper on the same GPU. The adapter sends `think: false` to turn off its reasoning mode, which would otherwise add seconds to every turn. |
+| `gemma3:12b` | ~8 GB | Try it if Swahili replies from Qwen are weak. It's stronger at multilingual and a bit slower. Run it with `--omit-think`. |
+
+Avoid reasoning models and anything above ~14B parameters. Reasoning adds latency, and larger models crowd out Whisper (large-v3-turbo needs ~2–3 GB).
+
 > **Clinical content is placeholder.** The rules in `triage/rules/rules.py` are loosely modelled on WHO IMCI danger signs for the demo. The Swahili red-flag phrases and all canned lines need review by a clinician and native speakers before any real use.
