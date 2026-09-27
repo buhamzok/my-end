@@ -203,7 +203,7 @@ python examples/local_chat.py                            # type as the caller; s
 python examples/local_chat.py --model gemma3:12b --omit-think
 ```
 
-**Recommended model for a 16 GB RTX 4090 laptop GPU:**
+**Recommended model for a 16 GB GPU (the team's Alienware desktop, RTX 4080 Super):**
 
 | Model | VRAM (Q4) | Why |
 |---|---|---|
@@ -214,7 +214,7 @@ Avoid reasoning models and anything above ~14B parameters. Reasoning adds latenc
 
 ### Voice test with Whisper
 
-`examples/voice_chat.py` tests the full voice loop on one laptop, before the phone line exists. You talk into the mic, `faster-whisper` transcribes it on the GPU, the harness and local model answer, and the reply is read aloud.
+`examples/voice_chat.py` tests the full voice loop on one PC, before the phone line exists. You talk into the mic, `faster-whisper` transcribes it on the GPU, the harness and local model answer, and the reply is read aloud.
 
 **What's needed**
 

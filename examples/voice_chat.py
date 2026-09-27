@@ -1,4 +1,4 @@
-"""Speak to the harness through the laptop mic, before the phone line exists.
+"""Speak to the harness through the PC's mic, before the phone line exists.
 
     mic -> faster-whisper (GPU) -> IntakeSession + local Ollama model -> spoken reply
 
