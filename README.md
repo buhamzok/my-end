@@ -212,4 +212,29 @@ python examples/local_chat.py --model gemma3:12b --omit-think
 
 Avoid reasoning models and anything above ~14B parameters. Reasoning adds latency, and larger models crowd out Whisper (large-v3-turbo needs ~2–3 GB).
 
+### Voice test with Whisper
+
+`examples/voice_chat.py` tests the full voice loop on one laptop, before the phone line exists. You talk into the mic, `faster-whisper` transcribes it on the GPU, the harness and local model answer, and the reply is read aloud.
+
+**What's needed**
+
+| Piece | What | Notes |
+|---|---|---|
+| Speech-to-text | [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper), model `large-v3-turbo`, float16 | About 2–3 GB VRAM, so it fits alongside `qwen3:8b` on 16 GB. Tuned for speed: greedy decoding (`beam_size=1`), silence trimming (`vad_filter`), fixed language (no auto-detect). |
+| CUDA libraries | cuBLAS 12 + cuDNN 9 | `pip install nvidia-cublas-cu12 nvidia-cudnn-cu12`. The script adds their folders to the DLL path itself, so no manual PATH editing is needed on Windows. |
+| Microphone | `sounddevice` + `numpy` | 16 kHz mono, push-to-talk. |
+| Text-to-speech | `pyttsx3` | Uses the offline Windows voices. It's only a stand-in for the phone provider's TTS. Use `--no-tts` to print replies instead. |
+| LLM | Ollama + `qwen3:8b` | See above. |
+
+```bash
+pip install -e ".[voice]"
+pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+ollama pull qwen3:8b
+python examples/voice_chat.py                    # English
+python examples/voice_chat.py --language sw      # Swahili
+python examples/voice_chat.py --device cpu --whisper-model small   # no GPU
+```
+
+Each turn prints how long speech-to-text and the LLM took, and the ticket is printed at the end. Whisper's Swahili is usable but weaker than its English, and it doesn't support Luganda or Runyankole. Those languages go through the keypad path (`triage/dtmf.py`).
+
 > **Clinical content is placeholder.** The rules in `triage/rules/rules.py` are loosely modelled on WHO IMCI danger signs for the demo. The Swahili red-flag phrases and all canned lines need review by a clinician and native speakers before any real use.

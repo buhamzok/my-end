@@ -12,6 +12,7 @@ dependencies = ["pydantic>=2"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
+voice = ["faster-whisper>=1.1", "sounddevice", "numpy", "pyttsx3"]
 
 [tool.setuptools.packages.find]
 include = ["triage*"]
