@@ -144,3 +144,53 @@ flowchart TD
 - [ ] Record local-language prompt set + build DTMF menu path
 - [ ] Build Next.js dashboard (ticket list, urgency sort, status update)
 - [ ] End-to-end demo run: live call → ticket → dashboard update
+
+---
+
+## 10. Triage Harness & Rules Engine (`triage/` package)
+
+This package covers boxes **E** (the LLM's directives and guardrails) and **G** (the rules engine) of the architecture. It's plain Python with no Django or telephony dependency, and it doesn't depend on any particular LLM provider.
+
+```bash
+pip install -e ".[dev]"
+pytest -q                      # full test suite
+python examples/cli_demo.py    # scripted calls: normal, drift, injection, emergency
+```
+
+### How the model is kept on task
+
+| Layer | Where | What it does |
+|---|---|---|
+| System prompt | `triage/prompts.py` | Intake-only role. The model never diagnoses, never names or doses medicine, and never judges urgency. Replies are short and spoken. It must answer in strict JSON using a closed symptom vocabulary. |
+| Caller speech as data | `prompts.wrap_utterance` | Caller words are wrapped in `<caller_utterance>` tags, so "ignore your rules…" is treated as off-topic, not as an instruction. |
+| Input guard | `guardrails.check_input` | Danger-sign keywords (English + Swahili) close the call as an **emergency without calling the model**. A danger sign the model picks up later ends the call the same way. |
+| Output guard | `guardrails.check_output` | Rejects bad JSON, diagnoses, medication advice, urgency claims, prompt leaks, markdown and over-long replies. A rejected reply gets one corrective retry. If that also fails, a canned safe line is spoken instead, and the valid symptom data is kept. |
+| Drift policy | `harness.IntakeSession` | The 1st off-topic turn gets the model's own redirect and the 2nd a firmer canned redirect. The 3rd ends the call with a health-worker callback. Calls also end after at most 6 turns. |
+| Rules engine | `triage/rules/` | The urgency tier comes **only** from the deterministic rules, never from the model. Every matched rule id is stored for audit. |
+| Fail safe | `rules.py` | If there's no usable data, the symptoms aren't recognised, or the intake didn't finish (hang-up, drift, turn cap, model failure), the call goes to Urgent / CHW callback, never to self-care. |
+
+### Integration
+
+```python
+from triage import IntakeSession, decide, report_from_keypresses
+
+class MyLLM:                                    # wrap any provider
+    def complete(self, system: str, messages: list[dict]) -> str: ...
+
+session = IntakeSession(MyLLM(), clinic_name="the community health line")
+tts(session.opening_line())
+while True:
+    result = session.handle_utterance(stt(caller_audio))
+    tts(result.reply_text)
+    if result.done:                             # result.emergency -> trigger routing now
+        break
+ticket = session.finalize().to_dict()           # report, decision, closed_reason, transcript -> Postgres
+# If the caller hangs up early, call session.finalize() anyway.
+
+# Local-language keypress path uses the same engine:
+decision = decide(report_from_keypresses({"age_group": "2", "fever": "1", "duration": "3"}))
+```
+
+`triage.dtmf.MENU` holds the question script for recording the local-language prompts.
+
+> **Clinical content is placeholder.** The rules in `triage/rules/rules.py` are loosely modelled on WHO IMCI danger signs for the demo. The Swahili red-flag phrases and all canned lines need review by a clinician and native speakers before any real use.
