@@ -1,28 +1,32 @@
 """Voice agent. Ported from SavaWatch voice.py: AT Voice XML + DTMF fallback + LLM extract slot."""
-import re, uuid, requests
+import io, re, sys, uuid, requests
+from pathlib import Path
 from xml.sax.saxutils import escape
-from .config import LLM_BASE_URL, LLM_API_KEY, LLM_MODEL, LLM_TIMEOUT, VOICE_NAME, PUBLIC_URL
+from .config import LLM_BASE_URL, LLM_API_KEY, LLM_MODEL, LLM_TIMEOUT, VOICE_NAME, PUBLIC_URL, ASR_MODEL, ASR_DEVICE
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))  # repo root: the triage/ package
+from triage import IntakeSession, decide, report_from_keypresses, UrgencyTier
+from triage.adapters import OllamaClient
+from triage.dtmf import MENU
+from triage.prompts import CLOSING_BY_TIER
+LLM = OllamaClient(LLM_MODEL or "qwen3:8b", re.sub(r"/v1/?$", "", LLM_BASE_URL or "http://localhost:11434"), timeout=LLM_TIMEOUT)
 _sessions: dict = {}
 LANG_MENU = "Press 1 for English, 2 for Kiswahili, 3 for Luganda menu."
-DTMF_SYMPTOMS = {"1":"fever","2":"cough","3":"diarrhea","4":"chest pain","5":"difficulty breathing","0":"human"}
 INTENTS = [("human",["human","agent","nurse","doctor","person"]),("symptom",["fever","cough","pain","bleed","breath","vomit","diarrhea"]),("bye",["bye","thank"]),]
 def _keyword(text:str):
     t=" "+re.sub(r"[^a-z ]"," ",text.lower())+" "
     for n,ph in INTENTS:
         if any(p in t for p in ph): return n
     return "other"
-def extract_symptoms(text:str)->dict:
-    """LLM extract slot (OpenAI-compatible). Fallback: keyword flags."""
-    if LLM_BASE_URL and LLM_MODEL:
-        try:
-            r=requests.post(LLM_BASE_URL.rstrip("/")+"/chat/completions",
-                headers={"Authorization":f"Bearer {LLM_API_KEY}"} if LLM_API_KEY else {},
-                timeout=LLM_TIMEOUT, json={"model":LLM_MODEL,"temperature":0,"max_tokens":100,
-                "messages":[{"role":"system","content":"Extract symptoms as JSON: {symptoms:[], severe:bool, duration_days:int}. No diagnosis."},
-                {"role":"user","content":text}]})
-            import json; return json.loads(r.json()["choices"][0]["message"]["content"])
-        except Exception as e: print("llm extract fail, rules fallback:",e)
-    return {"symptoms":[p for _,ph in INTENTS for p in ph if p in text.lower()],"severe":any(w in text.lower() for w in ["severe","heavy","cannot","unconscious"]),"duration_days":0}
+_asr = None
+def transcribe(recording_url:str, lang:str|None)->str:
+    """Download the AT recording and run faster-whisper on it (model loaded once)."""
+    global _asr
+    if _asr is None:
+        from faster_whisper import WhisperModel
+        _asr=WhisperModel(ASR_MODEL, device=ASR_DEVICE, compute_type="float16" if ASR_DEVICE=="cuda" else "int8")
+    audio=requests.get(recording_url, timeout=10).content
+    segments,_=_asr.transcribe(io.BytesIO(audio), language=lang, beam_size=1, vad_filter=True, condition_on_previous_text=False)
+    return " ".join(x.text.strip() for x in segments).strip()
 def _say(t:str):
     return f'<Say voice="{VOICE_NAME}">{escape(t)}</Say>'
 def render(reply:str,action:str,transfer_to:str=""):
@@ -36,23 +40,39 @@ def render(reply:str,action:str,transfer_to:str=""):
     return '<?xml version="1.0" encoding="UTF-8"?><Response>'+body+"</Response>"
 def start(phone,sid=None):
     sid=sid or uuid.uuid4().hex[:12]
-    s={"sid":sid,"phone":phone,"lang":None,"symptoms":[],"flags":{}}
+    s={"sid":sid,"phone":phone,"lang":None,"intake":IntakeSession(LLM),"keys":{},"q":0}
     _sessions[sid]=s
     return s, "Welcome. "+LANG_MENU, "menu"
+def _menu_prompt(s): return MENU[s["q"]].prompt+" Press 0 for a nurse."
 def turn(s,text=None,digits=None):
+    """Returns (reply, action, result). result is (report, decision) once the call is finished."""
     if not s.get("lang"):
         m={"1":"en","2":"sw","3":"luganda"}.get((digits or "")[:1])
-        if not m: return None,"Sorry. "+LANG_MENU,"menu"
+        if not m: return "Sorry. "+LANG_MENU,"menu",None
         s["lang"]=m
         if m=="luganda":
-            return None,"Luganda menu. Press 1 fever, 2 cough, 3 diarrhea, 4 chest pain, 5 breathing difficulty, 0 nurse.","menu"
-        return None,"Describe symptoms after beep.","listen"
+            return "Luganda menu. "+_menu_prompt(s),"menu",None
+        return "Describe symptoms after beep.","listen",None
     if s["lang"]=="luganda":
-        sym=DTMF_SYMPTOMS.get((digits or "")[:1])
-        if not sym: return None,"Press 1-5 symptom, 0 nurse.","menu"
-        if sym=="human": return None,"Connecting to nurse.","transfer"
-        s["symptoms"].append(sym); return sym,None,"triage"
-    if digits=="0": return None,"Connecting to nurse.","transfer"
-    d=extract_symptoms(text or ""); s["symptoms"]+=d.get("symptoms",[]); s["flags"]={**s["flags"],**{k:v for k,v in d.items() if k!="symptoms"}}
-    return text,None,"triage"
+        d=(digits or "")[:1]
+        if d=="0": return "Connecting to nurse.","transfer",None
+        q=MENU[s["q"]]
+        if d not in q.options: return "Sorry. "+_menu_prompt(s),"menu",None
+        s["keys"][q.id]=d; s["q"]+=1
+        report=report_from_keypresses(s["keys"]); decision=decide(report)
+        if decision.tier==UrgencyTier.EMERGENCY or s["q"]>=len(MENU):
+            s["done"]=True
+            return CLOSING_BY_TIER[decision.tier],"hangup",(report,decision)
+        return _menu_prompt(s),"menu",None
+    if digits=="0": return "Connecting to nurse.","transfer",None
+    if not text: return "Sorry, I did not catch that.","listen",None
+    r=s["intake"].handle_utterance(text)
+    if not r.done: return r.reply_text,"listen",None
+    s["done"]=True
+    return r.reply_text,"hangup",(r.outcome.report,r.outcome.decision)
+def finish(s):
+    """(report, decision) for a call that ended before intake finished, e.g. caller hung up."""
+    if s.get("lang")=="luganda":
+        report=report_from_keypresses(s["keys"]); return report,decide(report)
+    o=s["intake"].finalize(); return o.report,o.decision
 def get(sid): return _sessions.get(sid)
