@@ -5,3 +5,10 @@ __pycache__/
 .venv/
 build/
 dist/
+node_modules/
+.next/
+*.db
+.env
+backend/.env
+__pycache__/
+.venv/
